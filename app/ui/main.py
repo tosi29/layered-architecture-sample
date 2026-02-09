@@ -5,7 +5,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Form, Request
+from fastapi import Depends, FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -22,13 +22,21 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="stat
 TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
+@app.on_event("startup")
+def build_services() -> None:
+    sessions_repo, feedback_repo = build_repositories_from_env()
+    app.state.chat_service = ChatService(sessions_repo, feedback_repo)
+
+
+def get_chat_service(request: Request) -> ChatService:
+    return request.app.state.chat_service
+
+
 @app.get("/", response_class=HTMLResponse)
-def index(request: Request) -> HTMLResponse:
+def index(request: Request, service: ChatService = Depends(get_chat_service)) -> HTMLResponse:
     session_id = request.cookies.get("session_id")
     if not session_id:
         session_id = str(uuid.uuid4())
-    sessions_repo, feedback_repo = build_repositories_from_env()
-    service = ChatService(sessions_repo, feedback_repo)
     session = service.get_or_create_session(session_id)
 
     response = TEMPLATES.TemplateResponse(
@@ -44,13 +52,14 @@ def index(request: Request) -> HTMLResponse:
 
 
 @app.post("/chat")
-def chat(request: Request, message: str = Form(...)) -> JSONResponse:
+def chat(
+    request: Request,
+    message: str = Form(...),
+    service: ChatService = Depends(get_chat_service),
+) -> JSONResponse:
     session_id = request.cookies.get("session_id")
     if not session_id:
         return JSONResponse({"error": "missing session"}, status_code=400)
-
-    sessions_repo, feedback_repo = build_repositories_from_env()
-    service = ChatService(sessions_repo, feedback_repo)
     session = service.handle_message(session_id, message)
 
     return JSONResponse({"messages": [m.model_dump(mode="json") for m in session.messages]})
@@ -61,13 +70,11 @@ def feedback(
     request: Request,
     rating: int = Form(...),
     comment: str | None = Form(None),
+    service: ChatService = Depends(get_chat_service),
 ) -> JSONResponse:
     session_id = request.cookies.get("session_id")
     if not session_id:
         return JSONResponse({"error": "missing session"}, status_code=400)
-
-    sessions_repo, feedback_repo = build_repositories_from_env()
-    service = ChatService(sessions_repo, feedback_repo)
     service.save_feedback(Feedback(session_id=session_id, rating=rating, comment=comment))
     return JSONResponse({"ok": True})
 
